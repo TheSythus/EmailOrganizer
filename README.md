@@ -1,8 +1,16 @@
 # Apple Mail Email Organizer
 
-A Python tool that connects to your email via IMAP and automatically organizes your inbox by moving **advertising/promotional emails** into an `Advertising` folder and **spam** into a `Spam` folder.
+A Python tool that connects to your email via IMAP and uses **Claude AI** to intelligently read and classify your inbox emails, automatically moving **advertising/promotional emails** into an `Advertising` folder and **spam** into a `Spam` folder.
 
 Works with **Apple Mail (iCloud)**, Gmail, Outlook, and any IMAP-compatible provider.
+
+## How It Works
+
+1. Connects to your mailbox via IMAP
+2. Fetches emails from your inbox (configurable date range and batch size)
+3. Sends each email's subject, sender, headers, and body snippet to **Claude** for classification
+4. Claude reads the email and decides: **legitimate**, **advertising**, or **spam**
+5. Moves advertising and spam emails into their respective folders
 
 ## Setup
 
@@ -12,7 +20,18 @@ Works with **Apple Mail (iCloud)**, Gmail, Outlook, and any IMAP-compatible prov
 pip install -r requirements.txt
 ```
 
-### 2. Configure your account
+### 2. Get a Claude API key
+
+Sign up at [console.anthropic.com](https://console.anthropic.com) and create an API key.
+
+Set it as an environment variable:
+```bash
+export ANTHROPIC_API_KEY="sk-ant-..."
+```
+
+Or add it to the config file (see below).
+
+### 3. Configure your email account
 
 ```bash
 cp config.example.ini config.ini
@@ -30,7 +49,7 @@ Edit `config.ini` with your email credentials:
 - Port: `993`
 - Generate an app-specific password at [https://myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords)
 
-### 3. Run (dry run first)
+### 4. Run (dry run first)
 
 ```bash
 python -m email_organizer
@@ -38,7 +57,7 @@ python -m email_organizer
 
 By default, it runs in **dry run mode** — it logs which emails would be moved without actually moving them. Review the output to confirm the classification looks correct.
 
-### 4. Run for real
+### 5. Run for real
 
 ```bash
 python -m email_organizer --no-dry-run
@@ -57,13 +76,13 @@ python -m email_organizer --no-dry-run
 
 ## How Classification Works
 
-The classifier uses rule-based detection analyzing:
+Each email is sent to Claude with its subject, sender, key headers, and a body snippet. Claude analyzes the content and classifies it as:
 
-- **Email headers**: `List-Unsubscribe`, `X-Mailer` (Mailchimp, SendGrid, etc.), spam flags
-- **Sender patterns**: `noreply@`, `newsletter@`, `marketing@`, etc.
-- **Content keywords**: "unsubscribe", "special offer", "you have won", etc.
+- **Legitimate** — Personal messages, work emails, important transactional emails
+- **Advertising** — Newsletters, promotional offers, marketing campaigns
+- **Spam** — Scam attempts, phishing, unsolicited junk
 
-Emails are scored on both advertising and spam signals. High-confidence matches are moved; uncertain emails are left in the inbox.
+If the Claude API call fails for any reason, the email is left in the inbox (safe fallback).
 
 ## Folder Structure
 
@@ -73,7 +92,7 @@ email_organizer/
   __main__.py        # python -m entry point
   main.py            # CLI argument parsing and orchestration
   connection.py      # IMAP connection management
-  classifier.py      # Rule-based email classification
+  classifier.py      # Claude AI email classification
   organizer.py       # Fetch, classify, and move emails
 config.example.ini   # Template configuration
 ```

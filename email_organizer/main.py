@@ -105,8 +105,12 @@ def main() -> None:
     else:
         logger.info("=== LIVE MODE — emails WILL be moved ===")
 
+    # Claude API settings
+    api_key = config.get("claude", "api_key", fallback="") or None
+    model = config.get("claude", "model", fallback="claude-sonnet-4-20250514")
+
     conn = IMAPConnection(host, port, email_addr, password, use_ssl)
-    classifier = EmailClassifier()
+    classifier = EmailClassifier(api_key=api_key, model=model)
 
     with conn:
         organizer = EmailOrganizer(

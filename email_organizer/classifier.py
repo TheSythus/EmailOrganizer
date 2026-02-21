@@ -1,9 +1,11 @@
-"""Email classification engine - detects advertising and spam emails."""
+"""Email classification engine using Claude AI to intelligently categorize emails."""
 
-import re
+import json
 import logging
 from dataclasses import dataclass
 from enum import Enum
+
+import anthropic
 
 logger = logging.getLogger(__name__)
 
@@ -32,132 +34,97 @@ class ClassificationResult:
     reasons: list[str]
 
 
-# --- Known spam / advertising signals ---
+CLASSIFICATION_PROMPT = """\
+You are an email classification assistant. Analyze the following email and classify it into exactly one of these categories:
 
-ADVERTISING_KEYWORDS = [
-    "unsubscribe", "opt out", "opt-out", "email preferences",
-    "manage subscriptions", "subscription preferences",
-    "view in browser", "view this email in",
-    "no longer wish to receive", "update your preferences",
-    "promotional", "special offer", "limited time",
-    "exclusive deal", "discount code", "coupon",
-    "free shipping", "order now", "shop now", "buy now",
-    "sale ends", "flash sale", "clearance",
-    "newsletter", "weekly digest", "daily digest",
-]
+1. **legitimate** — A real, personal, or important email the user wants to see (work emails, personal messages, transactional receipts for purchases the user made, account security alerts from services they use, etc.)
+2. **advertising** — Promotional/marketing emails, newsletters, product announcements, sale notifications, brand emails the user subscribed to but are not urgent or personal.
+3. **spam** — Unsolicited junk mail, scam attempts, phishing, fake offers, deceptive emails the user never signed up for.
 
-SPAM_KEYWORDS = [
-    "you have won", "you've won", "congratulations you",
-    "claim your prize", "lottery winner",
-    "nigerian prince", "wire transfer",
-    "viagra", "cialis", "pharmacy",
-    "make money fast", "work from home opportunity",
-    "double your income", "financial freedom",
-    "click here immediately", "act now or",
-    "this is not spam", "this isn't spam",
-    "your account has been compromised",
-    "verify your identity immediately",
-    "suspended account", "account verification required",
-    "dear valued customer", "dear account holder",
-]
+Here is the email to classify:
 
-ADVERTISING_SENDER_PATTERNS = [
-    r"no[-_]?reply@",
-    r"noreply@",
-    r"newsletter@",
-    r"marketing@",
-    r"promotions?@",
-    r"offers?@",
-    r"deals@",
-    r"info@",
-    r"updates?@",
-    r"notifications?@",
-    r"hello@",
-    r"team@",
-    r"news@",
-]
+---
+**From:** {from_name} <{sender}>
+**To:** {to}
+**Subject:** {subject}
+**Key Headers:**
+- List-Unsubscribe: {list_unsubscribe}
+- X-Mailer: {x_mailer}
+- Precedence: {precedence}
 
-SPAM_HEADER_INDICATORS = [
-    # Emails with high spam scores from server-side filters
-    ("x-spam-status", r"yes", 0.8),
-    ("x-spam-flag", r"yes", 0.8),
-    # Bulk mail precedence
-    ("precedence", r"bulk", 0.3),
-    # Missing or suspicious authentication
-    ("authentication-results", r"fail", 0.4),
-    ("authentication-results", r"none", 0.2),
-]
+**Body (first 500 chars):**
+{body_snippet}
+---
 
-ADVERTISING_HEADER_INDICATORS = [
-    ("precedence", r"bulk", 0.3),
-    ("list-unsubscribe", r".", 0.5),
-    ("x-mailer", r"mailchimp|sendgrid|mailgun|constant.?contact|hubspot|marketo|campaign.?monitor", 0.6),
-    ("x-sg-id", r".", 0.5),  # SendGrid
-    ("x-mc-user", r".", 0.5),  # Mailchimp
-]
+Respond with ONLY a JSON object in this exact format, nothing else:
+{{"category": "legitimate"|"advertising"|"spam", "confidence": 0.0-1.0, "reasons": ["reason1", "reason2"]}}
+"""
 
 
 class EmailClassifier:
-    """Rule-based email classifier for advertising and spam detection."""
+    """Claude AI-powered email classifier."""
+
+    def __init__(self, api_key: str | None = None, model: str = "claude-sonnet-4-20250514"):
+        self.client = anthropic.Anthropic(api_key=api_key) if api_key else anthropic.Anthropic()
+        self.model = model
 
     def classify(self, email: EmailInfo) -> ClassificationResult:
-        """Classify an email as legitimate, advertising, or spam."""
-        spam_score = 0.0
-        ad_score = 0.0
-        reasons: list[str] = []
+        """Classify an email using Claude AI."""
+        prompt = CLASSIFICATION_PROMPT.format(
+            from_name=email.from_name,
+            sender=email.sender,
+            to=email.to,
+            subject=email.subject,
+            list_unsubscribe=email.headers.get("list-unsubscribe", "(none)"),
+            x_mailer=email.headers.get("x-mailer", "(none)"),
+            precedence=email.headers.get("precedence", "(none)"),
+            body_snippet=email.body_snippet[:500] if email.body_snippet else "(empty)",
+        )
 
-        # --- Header analysis ---
-        for header_name, pattern, weight in SPAM_HEADER_INDICATORS:
-            value = email.headers.get(header_name.lower(), "")
-            if re.search(pattern, value, re.IGNORECASE):
-                spam_score += weight
-                reasons.append(f"Spam header: {header_name} matches '{pattern}'")
+        try:
+            response = self.client.messages.create(
+                model=self.model,
+                max_tokens=256,
+                messages=[{"role": "user", "content": prompt}],
+            )
 
-        for header_name, pattern, weight in ADVERTISING_HEADER_INDICATORS:
-            value = email.headers.get(header_name.lower(), "")
-            if re.search(pattern, value, re.IGNORECASE):
-                ad_score += weight
-                reasons.append(f"Ad header: {header_name} matches '{pattern}'")
+            raw = response.content[0].text.strip()
+            # Strip markdown code fences if present
+            if raw.startswith("```"):
+                raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
+                if raw.endswith("```"):
+                    raw = raw[:-3]
+                raw = raw.strip()
 
-        # --- Sender analysis ---
-        sender_lower = email.sender.lower()
-        for pattern in ADVERTISING_SENDER_PATTERNS:
-            if re.search(pattern, sender_lower):
-                ad_score += 0.3
-                reasons.append(f"Sender matches ad pattern: {pattern}")
-                break
+            result = json.loads(raw)
 
-        # --- Content analysis (subject + body snippet) ---
-        text = (email.subject + " " + email.body_snippet).lower()
+            category = EmailCategory(result["category"])
+            confidence = float(result.get("confidence", 0.8))
+            reasons = result.get("reasons", [])
 
-        ad_keyword_hits = 0
-        for kw in ADVERTISING_KEYWORDS:
-            if kw in text:
-                ad_keyword_hits += 1
-        if ad_keyword_hits > 0:
-            weight = min(ad_keyword_hits * 0.15, 0.6)
-            ad_score += weight
-            reasons.append(f"Found {ad_keyword_hits} advertising keyword(s)")
+            return ClassificationResult(
+                category=category,
+                confidence=confidence,
+                reasons=reasons,
+            )
 
-        spam_keyword_hits = 0
-        for kw in SPAM_KEYWORDS:
-            if kw in text:
-                spam_keyword_hits += 1
-        if spam_keyword_hits > 0:
-            weight = min(spam_keyword_hits * 0.25, 0.8)
-            spam_score += weight
-            reasons.append(f"Found {spam_keyword_hits} spam keyword(s)")
-
-        # --- Decision ---
-        # Spam takes priority if both scores are high
-        if spam_score >= 0.6:
-            confidence = min(spam_score, 1.0)
-            return ClassificationResult(EmailCategory.SPAM, confidence, reasons)
-
-        if ad_score >= 0.5:
-            confidence = min(ad_score, 1.0)
-            return ClassificationResult(EmailCategory.ADVERTISING, confidence, reasons)
-
-        # Low scores - mark as legitimate
-        reasons.append("No strong spam or advertising signals detected")
-        return ClassificationResult(EmailCategory.LEGITIMATE, 1.0 - max(spam_score, ad_score), reasons)
+        except (json.JSONDecodeError, KeyError, ValueError) as e:
+            logger.warning(
+                "Failed to parse Claude response for '%s': %s — raw: %s",
+                email.subject[:40],
+                e,
+                raw if "raw" in dir() else "(no response)",
+            )
+            # Fall back to legitimate to avoid moving emails incorrectly
+            return ClassificationResult(
+                category=EmailCategory.LEGITIMATE,
+                confidence=0.0,
+                reasons=[f"Classification failed: {e}"],
+            )
+        except anthropic.APIError as e:
+            logger.error("Claude API error classifying '%s': %s", email.subject[:40], e)
+            return ClassificationResult(
+                category=EmailCategory.LEGITIMATE,
+                confidence=0.0,
+                reasons=[f"API error: {e}"],
+            )
